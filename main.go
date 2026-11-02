@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -15,11 +16,28 @@ func handleConnection(conn net.Conn) {
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
+			if err != io.EOF {
+				fmt.Fprintf(os.Stderr, "Connection read error: %v\n", err)
+			}
 			break
 		}
 		cmd := strings.TrimSpace(line)
-		if strings.ToUpper(cmd) == "PING" {
+		parts := strings.Fields(cmd)
+		if len(parts) == 0 {
+			continue
+		}
+
+		switch strings.ToUpper(parts[0]) {
+		case "PING":
 			conn.Write([]byte("+PONG\r\n"))
+		case "ECHO":
+			if len(parts) > 1 {
+				conn.Write([]byte("+" + strings.Join(parts[1:], " ") + "\r\n"))
+			} else {
+				conn.Write([]byte("-ERR wrong number of arguments for 'echo' command\r\n"))
+			}
+		default:
+			conn.Write([]byte("-ERR unknown command '" + parts[0] + "'\r\n"))
 		}
 	}
 }
