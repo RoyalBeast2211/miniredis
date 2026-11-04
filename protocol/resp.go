@@ -64,6 +64,42 @@ func (v Value) ToCommand() ([]string, error) {
 	return args, nil
 }
 
+func (v Value) Encode() []byte {
+	switch v.Type {
+	case TypeSimpleString:
+		return []byte(fmt.Sprintf("+%s\r\n", v.Str))
+	case TypeError:
+		return []byte(fmt.Sprintf("-%s\r\n", v.Str))
+	case TypeInteger:
+		return []byte(fmt.Sprintf(":%d\r\n", v.Num))
+	case TypeBulkString:
+		if v.IsNull {
+			return []byte("$-1\r\n")
+		}
+		return []byte(fmt.Sprintf("$%d\r\n%s\r\n", len(v.Str), v.Str))
+	case TypeArray:
+		if v.IsNull {
+			return []byte("*-1\r\n")
+		}
+		var buf []byte
+		buf = append(buf, []byte(fmt.Sprintf("*%d\r\n", len(v.Array)))...)
+		for _, elem := range v.Array {
+			buf = append(buf, elem.Encode()...)
+		}
+		return buf
+	default:
+		return []byte("-ERR unknown type\r\n")
+	}
+}
+
+func EncodeCommand(args ...string) []byte {
+	elems := make([]Value, len(args))
+	for i, arg := range args {
+		elems[i] = NewBulkString(arg)
+	}
+	return NewArray(elems).Encode()
+}
+
 type Reader struct {
 	reader *bufio.Reader
 }
