@@ -1,43 +1,61 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"strings"
+
+	"miniredis/protocol"
 )
+
+func handleCommand(args []string) protocol.Value {
+	if len(args) == 0 {
+		return protocol.NewError("ERR empty command")
+	}
+
+	cmd := strings.ToUpper(args[0])
+	switch cmd {
+	case "PING":
+		if len(args) == 1 {
+			return protocol.NewSimpleString("PONG")
+		} else if len(args) == 2 {
+			return protocol.NewBulkString(args[1])
+		}
+		return protocol.NewError("ERR wrong number of arguments for 'ping' command")
+	case "ECHO":
+		if len(args) == 2 {
+			return protocol.NewBulkString(args[1])
+		}
+		return protocol.NewError("ERR wrong number of arguments for 'echo' command")
+	default:
+		return protocol.NewError(fmt.Sprintf("ERR unknown command '%s'", args[0]))
+	}
+}
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	reader := bufio.NewReader(conn)
+	reader := protocol.NewReader(conn)
 	for {
-		line, err := reader.ReadString('\n')
+		val, err := reader.ReadValue()
 		if err != nil {
 			if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "Connection read error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Protocol read error: %v\n", err)
 			}
 			break
 		}
-		cmd := strings.TrimSpace(line)
-		parts := strings.Fields(cmd)
-		if len(parts) == 0 {
+
+		args, err := val.ToCommand()
+		if err != nil {
+			conn.Write(protocol.NewError(err.Error()).Encode())
 			continue
 		}
 
-		switch strings.ToUpper(parts[0]) {
-		case "PING":
-			conn.Write([]byte("+PONG\r\n"))
-		case "ECHO":
-			if len(parts) > 1 {
-				conn.Write([]byte("+" + strings.Join(parts[1:], " ") + "\r\n"))
-			} else {
-				conn.Write([]byte("-ERR wrong number of arguments for 'echo' command\r\n"))
-			}
-		default:
-			conn.Write([]byte("-ERR unknown command '" + parts[0] + "'\r\n"))
+		reply := handleCommand(args)
+		if _, err := conn.Write(reply.Encode()); err != nil {
+			break
 		}
 	}
 }
