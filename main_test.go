@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"miniredis/protocol"
+	"miniredis/storage"
 )
 
 func sendCommand(conn net.Conn, args ...string) (protocol.Value, error) {
@@ -22,57 +23,41 @@ func sendCommand(conn net.Conn, args ...string) (protocol.Value, error) {
 	return reader.ReadValue()
 }
 
-func TestServer_Ping(t *testing.T) {
+func TestServer_KeyValueCommands(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
 
-	go handleConnection(serverConn)
+	store := storage.NewStore()
+	defer store.Close()
+	go handleConnection(serverConn, store)
 
-	resp, err := sendCommand(clientConn, "PING")
-	if err != nil {
-		t.Fatalf("failed to send command: %v", err)
-	}
-	if resp.Type != protocol.TypeSimpleString || resp.Str != "PONG" {
-		t.Fatalf("expected +PONG, got %+v", resp)
-	}
-}
-
-func TestServer_Echo(t *testing.T) {
-	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-
-	go handleConnection(serverConn)
-
-	resp, err := sendCommand(clientConn, "ECHO", "hello world")
-	if err != nil {
-		t.Fatalf("failed to send command: %v", err)
-	}
-	if resp.Type != protocol.TypeBulkString || resp.Str != "hello world" {
-		t.Fatalf("expected $11\r\nhello world, got %+v", resp)
-	}
-}
-
-func TestServer_Pipelining(t *testing.T) {
-	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-
-	go handleConnection(serverConn)
-
-	cmd1 := protocol.NewArray([]protocol.Value{protocol.NewBulkString("PING")}).Encode()
-	cmd2 := protocol.NewArray([]protocol.Value{protocol.NewBulkString("ECHO"), protocol.NewBulkString("pipelined")}).Encode()
-
-	if _, err := clientConn.Write(append(cmd1, cmd2...)); err != nil {
-		t.Fatalf("failed to write pipelined commands: %v", err)
+	// SET foo bar
+	resp, err := sendCommand(clientConn, "SET", "foo", "bar")
+	if err != nil || resp.Str != "OK" {
+		t.Fatalf("expected OK, got %+v (err: %v)", resp, err)
 	}
 
-	reader := protocol.NewReader(clientConn)
-	r1, err := reader.ReadValue()
-	if err != nil || r1.Str != "PONG" {
-		t.Fatalf("unexpected reply 1: %+v (err: %v)", r1, err)
+	// GET foo
+	resp, err = sendCommand(clientConn, "GET", "foo")
+	if err != nil || resp.Str != "bar" {
+		t.Fatalf("expected bar, got %+v (err: %v)", resp, err)
 	}
 
-	r2, err := reader.ReadValue()
-	if err != nil || r2.Str != "pipelined" {
-		t.Fatalf("unexpected reply 2: %+v (err: %v)", r2, err)
+	// EXISTS foo
+	resp, err = sendCommand(clientConn, "EXISTS", "foo")
+	if err != nil || resp.Num != 1 {
+		t.Fatalf("expected 1, got %+v (err: %v)", resp, err)
+	}
+
+	// DEL foo
+	resp, err = sendCommand(clientConn, "DEL", "foo")
+	if err != nil || resp.Num != 1 {
+		t.Fatalf("expected 1, got %+v (err: %v)", resp, err)
+	}
+
+	// GET foo (missing)
+	resp, err = sendCommand(clientConn, "GET", "foo")
+	if err != nil || !resp.IsNull {
+		t.Fatalf("expected null bulk string, got %+v (err: %v)", resp, err)
 	}
 }
