@@ -8,9 +8,10 @@ import (
 	"strings"
 
 	"miniredis/protocol"
+	"miniredis/storage"
 )
 
-func handleCommand(args []string) protocol.Value {
+func handleCommand(store *storage.Store, args []string) protocol.Value {
 	if len(args) == 0 {
 		return protocol.NewError("ERR empty command")
 	}
@@ -29,12 +30,49 @@ func handleCommand(args []string) protocol.Value {
 			return protocol.NewBulkString(args[1])
 		}
 		return protocol.NewError("ERR wrong number of arguments for 'echo' command")
+	case "SET":
+		if len(args) != 3 {
+			return protocol.NewError("ERR wrong number of arguments for 'set' command")
+		}
+		store.Set(args[1], args[2])
+		return protocol.NewSimpleString("OK")
+	case "GET":
+		if len(args) != 2 {
+			return protocol.NewError("ERR wrong number of arguments for 'get' command")
+		}
+		val, exists := store.Get(args[1])
+		if !exists {
+			return protocol.NewNullBulkString()
+		}
+		return protocol.NewBulkString(val)
+	case "DEL":
+		if len(args) < 2 {
+			return protocol.NewError("ERR wrong number of arguments for 'del' command")
+		}
+		deletedCount := int64(0)
+		for _, key := range args[1:] {
+			if store.Delete(key) {
+				deletedCount++
+			}
+		}
+		return protocol.NewInteger(deletedCount)
+	case "EXISTS":
+		if len(args) < 2 {
+			return protocol.NewError("ERR wrong number of arguments for 'exists' command")
+		}
+		existCount := int64(0)
+		for _, key := range args[1:] {
+			if store.Exists(key) {
+				existCount++
+			}
+		}
+		return protocol.NewInteger(existCount)
 	default:
 		return protocol.NewError(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 	}
 }
 
-func handleConnection(conn net.Conn) {
+func handleConnection(conn net.Conn, store *storage.Store) {
 	defer conn.Close()
 
 	reader := protocol.NewReader(conn)
@@ -53,24 +91,27 @@ func handleConnection(conn net.Conn) {
 			continue
 		}
 
-		reply := handleCommand(args)
+		reply := handleCommand(store, args)
 		if _, err := conn.Write(reply.Encode()); err != nil {
 			break
 		}
 	}
 }
 
-func runServer(listener net.Listener) error {
+func runServer(listener net.Listener, store *storage.Store) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return err
 		}
-		go handleConnection(conn)
+		go handleConnection(conn, store)
 	}
 }
 
 func main() {
+	store := storage.NewStore()
+	defer store.Close()
+
 	listener, err := net.Listen("tcp", "127.0.0.1:6379")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to bind to port 6379: %v\n", err)
@@ -79,7 +120,7 @@ func main() {
 	defer listener.Close()
 
 	fmt.Println("MiniRedis server listening on 127.0.0.1:6379...")
-	if err := runServer(listener); err != nil {
+	if err := runServer(listener, store); err != nil {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)
 	}
