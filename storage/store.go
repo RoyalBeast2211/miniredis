@@ -7,19 +7,53 @@ import (
 )
 
 type Store struct {
-	mu      sync.RWMutex
-	data    map[string]string
-	expires map[string]time.Time
+	mu          sync.RWMutex
+	data        map[string]string
+	expires     map[string]time.Time
+	stopCleanup chan struct{}
 }
 
 func NewStore() *Store {
-	return &Store{
-		data:    make(map[string]string),
-		expires: make(map[string]time.Time),
+	s := &Store{
+		data:        make(map[string]string),
+		expires:     make(map[string]time.Time),
+		stopCleanup: make(chan struct{}),
 	}
+	go s.startActiveCleanup(1 * time.Second)
+	return s
 }
 
 func (s *Store) Close() {
+	select {
+	case <-s.stopCleanup:
+	default:
+		close(s.stopCleanup)
+	}
+}
+
+func (s *Store) startActiveCleanup(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCleanup:
+			return
+		case <-ticker.C:
+			s.cleanExpiredKeys()
+		}
+	}
+}
+
+func (s *Store) cleanExpiredKeys() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for key, deadline := range s.expires {
+		if now.After(deadline) {
+			delete(s.data, key)
+			delete(s.expires, key)
+		}
+	}
 }
 
 func (s *Store) isExpiredLocked(key string) bool {
