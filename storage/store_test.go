@@ -3,28 +3,28 @@ package storage
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
-func TestStore_BasicCRUD(t *testing.T) {
+func TestStore_TTL(t *testing.T) {
 	s := NewStore()
 	defer s.Close()
 
-	s.Set("name", "miniredis")
-	val, ok := s.Get("name")
-	if !ok || val != "miniredis" {
-		t.Fatalf("expected miniredis, got %q", val)
+	s.Set("k", "v")
+	if ttl := s.TTL("k"); ttl != -1 {
+		t.Fatalf("expected -1 for permanent key, got %d", ttl)
 	}
 
-	if !s.Exists("name") {
-		t.Fatalf("expected key to exist")
+	s.Expire("k", 10)
+	if ttl := s.TTL("k"); ttl <= 0 || ttl > 10 {
+		t.Fatalf("expected TTL ~10, got %d", ttl)
 	}
 
-	if !s.Delete("name") {
-		t.Fatalf("expected delete to return true")
+	if !s.Persist("k") {
+		t.Fatalf("expected persist to succeed")
 	}
-
-	if s.Exists("name") {
-		t.Fatalf("expected key to be deleted")
+	if ttl := s.TTL("k"); ttl != -1 {
+		t.Fatalf("expected -1 after persist, got %d", ttl)
 	}
 }
 
