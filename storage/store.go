@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"container/list"
 	"math"
 	"sync"
 	"time"
@@ -10,13 +11,23 @@ type Store struct {
 	mu          sync.RWMutex
 	data        map[string]string
 	expires     map[string]time.Time
+	maxKeys     int
+	evictList   *list.List
+	elements    map[string]*list.Element
 	stopCleanup chan struct{}
 }
 
 func NewStore() *Store {
+	return NewStoreWithCapacity(0)
+}
+
+func NewStoreWithCapacity(maxKeys int) *Store {
 	s := &Store{
 		data:        make(map[string]string),
 		expires:     make(map[string]time.Time),
+		maxKeys:     maxKeys,
+		evictList:   list.New(),
+		elements:    make(map[string]*list.Element),
 		stopCleanup: make(chan struct{}),
 	}
 	go s.startActiveCleanup(1 * time.Second)
