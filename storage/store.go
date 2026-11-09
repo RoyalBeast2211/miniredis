@@ -177,3 +177,18 @@ func (s *Store) Persist(key string) bool {
 	delete(s.expires, key)
 	return true
 }
+
+func (s *Store) evictOldestLocked() {
+	if s.evictList == nil {
+		return
+	}
+	tail := s.evictList.Back()
+	if tail == nil {
+		return
+	}
+	key := tail.Value.(string)
+	delete(s.data, key)
+	delete(s.expires, key)
+	s.evictList.Remove(tail)
+	delete(s.elements, key)
+}
