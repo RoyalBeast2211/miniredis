@@ -7,11 +7,12 @@ import (
 	"os"
 	"strings"
 
+	"miniredis/aof"
 	"miniredis/protocol"
 	"miniredis/storage"
 )
 
-func handleCommand(store *storage.Store, args []string) protocol.Value {
+func handleCommand(store *storage.Store, aofWriter *aof.AOF, args []string) protocol.Value {
 	if len(args) == 0 {
 		return protocol.NewError("ERR empty command")
 	}
@@ -35,6 +36,9 @@ func handleCommand(store *storage.Store, args []string) protocol.Value {
 			return protocol.NewError("ERR wrong number of arguments for 'set' command")
 		}
 		store.Set(args[1], args[2])
+		if aofWriter != nil {
+			_ = aofWriter.Write(args)
+		}
 		return protocol.NewSimpleString("OK")
 	case "GET":
 		if len(args) != 2 {
@@ -53,6 +57,9 @@ func handleCommand(store *storage.Store, args []string) protocol.Value {
 		for _, key := range args[1:] {
 			if store.Delete(key) {
 				deletedCount++
+				if aofWriter != nil {
+					_ = aofWriter.Write([]string{"DEL", key})
+				}
 			}
 		}
 		return protocol.NewInteger(deletedCount)
@@ -72,7 +79,7 @@ func handleCommand(store *storage.Store, args []string) protocol.Value {
 	}
 }
 
-func handleConnection(conn net.Conn, store *storage.Store) {
+func handleConnection(conn net.Conn, store *storage.Store, aofWriter *aof.AOF) {
 	defer conn.Close()
 
 	reader := protocol.NewReader(conn)
@@ -91,26 +98,33 @@ func handleConnection(conn net.Conn, store *storage.Store) {
 			continue
 		}
 
-		reply := handleCommand(store, args)
+		reply := handleCommand(store, aofWriter, args)
 		if _, err := conn.Write(reply.Encode()); err != nil {
 			break
 		}
 	}
 }
 
-func runServer(listener net.Listener, store *storage.Store) error {
+func runServer(listener net.Listener, store *storage.Store, aofWriter *aof.AOF) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return err
 		}
-		go handleConnection(conn, store)
+		go handleConnection(conn, store, aofWriter)
 	}
 }
 
 func main() {
 	store := storage.NewStore()
 	defer store.Close()
+
+	aofWriter, err := aof.Open("appendonly.aof", aof.SyncEverySecond)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open AOF: %v\n", err)
+		os.Exit(1)
+	}
+	defer aofWriter.Close()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:6379")
 	if err != nil {
@@ -120,7 +134,7 @@ func main() {
 	defer listener.Close()
 
 	fmt.Println("MiniRedis server listening on 127.0.0.1:6379...")
-	if err := runServer(listener, store); err != nil {
+	if err := runServer(listener, store, aofWriter); err != nil {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)
 	}
