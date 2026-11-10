@@ -9,7 +9,17 @@ import (
 	"miniredis/protocol"
 )
 
+type SyncPolicy string
+
+const (
+	SyncAlways      SyncPolicy = "always"
+	SyncEverySecond SyncPolicy = "everysec"
+	SyncNo          SyncPolicy = "no"
+)
+
 type AOF struct {
+	policy SyncPolicy
+
 	mu     sync.Mutex
 	file   *os.File
 	writer *bufio.Writer
@@ -19,7 +29,7 @@ func encodeCommand(args []string) []byte {
 	return protocol.EncodeCommand(args...)
 }
 
-func Open(path string) (*AOF, error) {
+func Open(path string, policy SyncPolicy) (*AOF, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open aof file: %w", err)
@@ -27,6 +37,7 @@ func Open(path string) (*AOF, error) {
 	return &AOF{
 		file:   file,
 		writer: bufio.NewWriter(file),
+		policy: policy,
 	}, nil
 }
 
