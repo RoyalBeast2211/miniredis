@@ -63,3 +63,24 @@ func (a *AOF) Close() error {
 	}
 	return nil
 }
+
+type RecoveryResult struct {
+	CommandsReplayed int64
+	TruncatedBytes   int64
+}
+
+func Recover(path string, store *storage.Store) (RecoveryResult, error) {
+	return RecoverWithOffset(path, store, 0)
+}
+
+func RecoverWithOffset(path string, store *storage.Store, startOffset int64) (RecoveryResult, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return RecoveryResult{}, nil
+		}
+		return RecoveryResult{}, err
+	}
+	defer file.Close()
+	return RecoveryResult{}, nil
+}
