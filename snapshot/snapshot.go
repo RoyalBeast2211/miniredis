@@ -242,16 +242,52 @@ func Save(path string, aofOffset int64, entries []storage.SnapshotEntry) error {
 		return err
 	}
 
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	tempPath := path + ".tmp"
+	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		file.Close()
+		_ = os.Remove(tempPath)
+	}()
 
 	if _, err := file.Write(data); err != nil {
 		return err
 	}
-	return file.Sync()
+
+	// Force OS kernel to commit disk buffers (fsync)
+	if TestHookBeforeSync != nil {
+		if err := TestHookBeforeSync(file); err != nil {
+			return err
+		}
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+
+	if err := file.Close(); err != nil {
+		return err
+	}
+
+	// Atomically rename temp file to target path
+	if TestHookBeforeRename != nil {
+		if err := TestHookBeforeRename(tempPath); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+
+	// Sync parent directory to persist directory entry change on POSIX filesystems
+	dirFile, err := os.Open(dir)
+	if err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
+	}
+
+	return nil
 }
 
 // Load reads, verifies, and deserializes a snapshot file.
