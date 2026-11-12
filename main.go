@@ -9,8 +9,22 @@ import (
 
 	"miniredis/aof"
 	"miniredis/protocol"
+	"miniredis/snapshot"
 	"miniredis/storage"
 )
+
+func takeSnapshot(store *storage.Store, aofWriter *aof.AOF, path string) error {
+	var aofOffset int64 = 0
+	if aofWriter != nil {
+		offset, err := aofWriter.Offset()
+		if err != nil {
+			return err
+		}
+		aofOffset = offset
+	}
+	entries := store.SnapshotData()
+	return snapshot.Save(path, aofOffset, entries)
+}
 
 func handleCommand(store *storage.Store, aofWriter *aof.AOF, args []string) protocol.Value {
 	if len(args) == 0 {
@@ -74,6 +88,11 @@ func handleCommand(store *storage.Store, aofWriter *aof.AOF, args []string) prot
 			}
 		}
 		return protocol.NewInteger(existCount)
+	case "SAVE":
+		if err := takeSnapshot(store, aofWriter, "dump.rdb"); err != nil {
+			return protocol.NewError(fmt.Sprintf("ERR failed to save snapshot: %v", err))
+		}
+		return protocol.NewSimpleString("OK")
 	default:
 		return protocol.NewError(fmt.Sprintf("ERR unknown command '%s'", args[0]))
 	}
@@ -118,6 +137,14 @@ func runServer(listener net.Listener, store *storage.Store, aofWriter *aof.AOF) 
 func main() {
 	store := storage.NewStore()
 	defer store.Close()
+
+	var startOffset int64 = 0
+	if header, entries, err := snapshot.Load("dump.rdb"); err == nil {
+		store.LoadSnapshot(entries)
+		startOffset = header.AOFOffset
+	}
+
+	_, _ = aof.RecoverWithOffset("appendonly.aof", store, startOffset)
 
 	aofWriter, err := aof.Open("appendonly.aof", aof.SyncEverySecond)
 	if err != nil {
