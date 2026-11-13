@@ -88,6 +88,14 @@ func handleCommand(store *storage.Store, aofWriter *aof.AOF, args []string) prot
 			}
 		}
 		return protocol.NewInteger(existCount)
+	case "BGREWRITEAOF":
+		if aofWriter == nil {
+			return protocol.NewError("ERR AOF persistence is disabled")
+		}
+		if _, err := aofWriter.Rewrite(store, "dump.rdb"); err != nil {
+			return protocol.NewError(fmt.Sprintf("ERR rewrite failed: %v", err))
+		}
+		return protocol.NewSimpleString("OK")
 	case "SAVE":
 		if err := takeSnapshot(store, aofWriter, "dump.rdb"); err != nil {
 			return protocol.NewError(fmt.Sprintf("ERR failed to save snapshot: %v", err))
