@@ -8,52 +8,70 @@ import (
 	"strconv"
 )
 
+// Type represents the RESP data type identifier byte.
 type Type byte
 
 const (
+	// TypeSimpleString represents simple strings: "+OK\r\n"
 	TypeSimpleString Type = '+'
-	TypeError        Type = '-'
-	TypeInteger      Type = ':'
-	TypeBulkString   Type = '$'
-	TypeArray        Type = '*'
+	// TypeError represents error messages: "-ERR message\r\n"
+	TypeError Type = '-'
+	// TypeInteger represents signed 64-bit integers: ":1000\r\n"
+	TypeInteger Type = ':'
+	// TypeBulkString represents binary-safe strings with explicit length: "$5\r\nhello\r\n"
+	TypeBulkString Type = '$'
+	// TypeArray represents an ordered list of RESP values: "*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n"
+	TypeArray Type = '*'
 )
 
+// Value represents any data value supported by the RESP protocol.
+// It can store a simple string, an error, an integer, a bulk string, or an array.
 type Value struct {
-	Type   Type
-	Str    string
-	Num    int64
-	Array  []Value
-	IsNull bool
+	Type   Type    // The RESP type (+, -, :, $, *)
+	Str    string  // Used for SimpleString, Error, and BulkString
+	Num    int64   // Used for Integer
+	Array  []Value // Used for Array
+	IsNull bool    // True if this represents a null value (e.g., "$-1\r\n" or "*-1\r\n")
 }
 
+// NewSimpleString creates a RESP Simple String value.
 func NewSimpleString(s string) Value {
 	return Value{Type: TypeSimpleString, Str: s}
 }
 
+// NewError creates a RESP Error value.
 func NewError(msg string) Value {
 	return Value{Type: TypeError, Str: msg}
 }
 
+// NewInteger creates a RESP Integer value.
 func NewInteger(n int64) Value {
 	return Value{Type: TypeInteger, Num: n}
 }
 
+// NewBulkString creates a RESP Bulk String value.
 func NewBulkString(s string) Value {
 	return Value{Type: TypeBulkString, Str: s}
 }
 
+// NewNullBulkString creates a RESP Null Bulk String ("$-1\r\n").
 func NewNullBulkString() Value {
 	return Value{Type: TypeBulkString, IsNull: true}
 }
 
+// NewArray creates a RESP Array value containing the given elements.
 func NewArray(elems []Value) Value {
 	return Value{Type: TypeArray, Array: elems}
 }
 
+// ToCommand converts a RESP Array of Bulk Strings into a slice of command strings.
+// In Redis, all commands sent from clients are encoded as an Array of Bulk Strings.
+// For example: ["ECHO", "hello world"]
 func (v Value) ToCommand() ([]string, error) {
 	if v.Type != TypeArray {
 		return nil, errors.New("command must be a RESP array")
 	}
+
 	args := make([]string, len(v.Array))
 	for i, elem := range v.Array {
 		if elem.Type != TypeBulkString {
@@ -64,34 +82,8 @@ func (v Value) ToCommand() ([]string, error) {
 	return args, nil
 }
 
-func (v Value) Encode() []byte {
-	switch v.Type {
-	case TypeSimpleString:
-		return []byte(fmt.Sprintf("+%s\r\n", v.Str))
-	case TypeError:
-		return []byte(fmt.Sprintf("-%s\r\n", v.Str))
-	case TypeInteger:
-		return []byte(fmt.Sprintf(":%d\r\n", v.Num))
-	case TypeBulkString:
-		if v.IsNull {
-			return []byte("$-1\r\n")
-		}
-		return []byte(fmt.Sprintf("$%d\r\n%s\r\n", len(v.Str), v.Str))
-	case TypeArray:
-		if v.IsNull {
-			return []byte("*-1\r\n")
-		}
-		var buf []byte
-		buf = append(buf, []byte(fmt.Sprintf("*%d\r\n", len(v.Array)))...)
-		for _, elem := range v.Array {
-			buf = append(buf, elem.Encode()...)
-		}
-		return buf
-	default:
-		return []byte("-ERR unknown type\r\n")
-	}
-}
-
+// EncodeCommand encodes a command name and its string arguments into a standard RESP Array of Bulk Strings.
+// For example: ["SET", "k", "v"] -> "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n".
 func EncodeCommand(args ...string) []byte {
 	elems := make([]Value, len(args))
 	for i, arg := range args {
@@ -100,6 +92,115 @@ func EncodeCommand(args ...string) []byte {
 	return NewArray(elems).Encode()
 }
 
+// Pre-allocated static byte slices for common RESP responses to avoid heap allocations.
+var (
+	respOK        = []byte("+OK\r\n")
+	respPong      = []byte("+PONG\r\n")
+	respNullBulk  = []byte("$-1\r\n")
+	respNullArray = []byte("*-1\r\n")
+)
+
+// estimateSize estimates the serialized byte length to allocate an appropriately sized buffer.
+func (v Value) estimateSize() int {
+	switch v.Type {
+	case TypeSimpleString, TypeError:
+		// prefix(1) + str + CRLF(2)
+		return len(v.Str) + 3
+	case TypeInteger:
+		// prefix(1) + digits(~20) + CRLF(2)
+		return 23
+	case TypeBulkString:
+		if v.IsNull {
+			return 5 // $-1\r\n
+		}
+		// prefix(1) + digits(len) + CRLF(2) + str + CRLF(2)
+		return len(v.Str) + 15
+	case TypeArray:
+		if v.IsNull {
+			return 5 // *-1\r\n
+		}
+		size := 15
+		for i := range v.Array {
+			size += v.Array[i].estimateSize()
+		}
+		return size
+	default:
+		return 32
+	}
+}
+
+// AppendEncode serializes a RESP Value by appending its raw bytes to dst.
+// This allows callers to reuse an existing buffer and avoid intermediate heap allocations.
+func (v Value) AppendEncode(dst []byte) []byte {
+	switch v.Type {
+	case TypeSimpleString:
+		dst = append(dst, '+')
+		dst = append(dst, v.Str...)
+		return append(dst, '\r', '\n')
+
+	case TypeError:
+		dst = append(dst, '-')
+		dst = append(dst, v.Str...)
+		return append(dst, '\r', '\n')
+
+	case TypeInteger:
+		dst = append(dst, ':')
+		dst = strconv.AppendInt(dst, v.Num, 10)
+		return append(dst, '\r', '\n')
+
+	case TypeBulkString:
+		if v.IsNull {
+			return append(dst, '$', '-', '1', '\r', '\n')
+		}
+		dst = append(dst, '$')
+		dst = strconv.AppendInt(dst, int64(len(v.Str)), 10)
+		dst = append(dst, '\r', '\n')
+		dst = append(dst, v.Str...)
+		return append(dst, '\r', '\n')
+
+	case TypeArray:
+		if v.IsNull {
+			return append(dst, '*', '-', '1', '\r', '\n')
+		}
+		dst = append(dst, '*')
+		dst = strconv.AppendInt(dst, int64(len(v.Array)), 10)
+		dst = append(dst, '\r', '\n')
+		for i := range v.Array {
+			dst = v.Array[i].AppendEncode(dst)
+		}
+		return dst
+
+	default:
+		return dst
+	}
+}
+
+// Encode serializes a RESP Value into its raw byte representation ready to be sent over the wire.
+func (v Value) Encode() []byte {
+	// Fast path: return static pre-allocated slices for the most common constant responses.
+	switch v.Type {
+	case TypeSimpleString:
+		if v.Str == "OK" {
+			return respOK
+		}
+		if v.Str == "PONG" {
+			return respPong
+		}
+	case TypeBulkString:
+		if v.IsNull {
+			return respNullBulk
+		}
+	case TypeArray:
+		if v.IsNull {
+			return respNullArray
+		}
+	}
+
+	// Dynamic path: pre-size the buffer based on estimated size and append directly into it.
+	return v.AppendEncode(make([]byte, 0, v.estimateSize()))
+}
+
+// Reader wraps a bufio.Reader to provide convenient methods for parsing incoming RESP streams.
 type Reader struct {
 	reader *bufio.Reader
 }
