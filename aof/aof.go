@@ -501,9 +501,15 @@ func (a *AOF) startPeriodicSync(interval time.Duration) {
 			fileToSync := a.file
 			a.mu.Unlock()
 
-			// Synchronous fsync
-			if a.file != nil {
-				_ = a.file.Sync()
+			// 2. Perform blocking disk fsync in background without holding a.mu.
+			// If a previous disk fsync is still in flight, skip queuing a duplicate.
+			if a.syncing.CompareAndSwap(false, true) {
+				a.syncWG.Add(1)
+				go func(f *os.File) {
+					defer a.syncWG.Done()
+					defer a.syncing.Store(false)
+					_ = f.Sync()
+				}(fileToSync)
 			}
 		}
 	}
