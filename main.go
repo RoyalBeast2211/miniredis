@@ -1,176 +1,167 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"net"
+	_ "net/http/pprof"
 	"os"
-	"strings"
+	"strconv"
 
 	"miniredis/aof"
+	"miniredis/config"
+	"miniredis/logger"
 	"miniredis/protocol"
+	"miniredis/replication"
 	"miniredis/snapshot"
 	"miniredis/storage"
 )
 
-func takeSnapshot(store *storage.Store, aofWriter *aof.AOF, path string) error {
-	var aofOffset int64 = 0
-	if aofWriter != nil {
-		offset, err := aofWriter.Offset()
-		if err != nil {
-			return err
-		}
-		aofOffset = offset
-	}
-	entries := store.SnapshotData()
-	return snapshot.Save(path, aofOffset, entries)
+// ServerContext adapts the unified Server struct for backwards compatibility with earlier test suites.
+type ServerContext struct {
+	server  *Server
+	replica *replication.Replica
 }
 
-func handleCommand(store *storage.Store, aofWriter *aof.AOF, args []string) protocol.Value {
-	if len(args) == 0 {
-		return protocol.NewError("ERR empty command")
+// NewServerContext creates a backwards-compatible ServerContext.
+func NewServerContext(store *storage.Store, aofWriter *aof.AOF, isReplica bool, replicaOfAddr string, serverPort string) *ServerContext {
+	cfg := config.NewDefaultConfig()
+	if isReplica {
+		cfg.ReplicaOf = replicaOfAddr
+	}
+	if p, err := strconv.Atoi(serverPort); err == nil && p > 0 {
+		cfg.Port = p
 	}
 
-	cmd := strings.ToUpper(args[0])
-	switch cmd {
-	case "PING":
-		if len(args) == 1 {
-			return protocol.NewSimpleString("PONG")
-		} else if len(args) == 2 {
-			return protocol.NewBulkString(args[1])
-		}
-		return protocol.NewError("ERR wrong number of arguments for 'ping' command")
-	case "ECHO":
-		if len(args) == 2 {
-			return protocol.NewBulkString(args[1])
-		}
-		return protocol.NewError("ERR wrong number of arguments for 'echo' command")
-	case "SET":
-		if len(args) != 3 {
-			return protocol.NewError("ERR wrong number of arguments for 'set' command")
-		}
-		store.Set(args[1], args[2])
-		if aofWriter != nil {
-			_ = aofWriter.Write(args)
-		}
-		return protocol.NewSimpleString("OK")
-	case "GET":
-		if len(args) != 2 {
-			return protocol.NewError("ERR wrong number of arguments for 'get' command")
-		}
-		val, exists := store.Get(args[1])
-		if !exists {
-			return protocol.NewNullBulkString()
-		}
-		return protocol.NewBulkString(val)
-	case "DEL":
-		if len(args) < 2 {
-			return protocol.NewError("ERR wrong number of arguments for 'del' command")
-		}
-		deletedCount := int64(0)
-		for _, key := range args[1:] {
-			if store.Delete(key) {
-				deletedCount++
-				if aofWriter != nil {
-					_ = aofWriter.Write([]string{"DEL", key})
-				}
-			}
-		}
-		return protocol.NewInteger(deletedCount)
-	case "EXISTS":
-		if len(args) < 2 {
-			return protocol.NewError("ERR wrong number of arguments for 'exists' command")
-		}
-		existCount := int64(0)
-		for _, key := range args[1:] {
-			if store.Exists(key) {
-				existCount++
-			}
-		}
-		return protocol.NewInteger(existCount)
-	case "BGREWRITEAOF":
-		if aofWriter == nil {
-			return protocol.NewError("ERR AOF persistence is disabled")
-		}
-		if _, err := aofWriter.Rewrite(store, "dump.rdb"); err != nil {
-			return protocol.NewError(fmt.Sprintf("ERR rewrite failed: %v", err))
-		}
-		return protocol.NewSimpleString("OK")
-	case "SAVE":
-		if err := takeSnapshot(store, aofWriter, "dump.rdb"); err != nil {
-			return protocol.NewError(fmt.Sprintf("ERR failed to save snapshot: %v", err))
-		}
-		return protocol.NewSimpleString("OK")
-	default:
-		return protocol.NewError(fmt.Sprintf("ERR unknown command '%s'", args[0]))
+	s := NewServer(cfg, store, aofWriter)
+	return &ServerContext{
+		server:  s,
+		replica: s.replica,
 	}
 }
 
+// IsReplica returns whether the server is configured as a replica.
+func (ctx *ServerContext) IsReplica() bool {
+	return ctx.server.IsReplica()
+}
+
+// Close gracefully stops the server context.
+func (ctx *ServerContext) Close() {
+	_ = ctx.server.Shutdown(context.Background())
+}
+
+// handleCommand dispatches a command through the server's command dispatcher (backwards compatibility).
+func handleCommand(ctx *ServerContext, args []string) protocol.Value {
+	return ctx.server.dispatchCommand(args)
+}
+
+// handleConnection manages communication with one client (backwards compatibility).
 func handleConnection(conn net.Conn, store *storage.Store, aofWriter *aof.AOF) {
-	defer conn.Close()
-
-	reader := protocol.NewReader(conn)
-	for {
-		val, err := reader.ReadValue()
-		if err != nil {
-			if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "Protocol read error: %v\n", err)
-			}
-			break
-		}
-
-		args, err := val.ToCommand()
-		if err != nil {
-			conn.Write(protocol.NewError(err.Error()).Encode())
-			continue
-		}
-
-		reply := handleCommand(store, aofWriter, args)
-		if _, err := conn.Write(reply.Encode()); err != nil {
-			break
-		}
-	}
+	s := NewServer(nil, store, aofWriter)
+	s.clientWg.Add(1)
+	s.handleConnection(conn)
 }
 
+// handleConnectionWithContext manages communication with one client using a ServerContext.
+func handleConnectionWithContext(conn net.Conn, ctx *ServerContext) {
+	ctx.server.clientWg.Add(1)
+	ctx.server.handleConnection(conn)
+}
+
+// runServer starts listening for TCP connections on the specified address with default Primary context.
 func runServer(listener net.Listener, store *storage.Store, aofWriter *aof.AOF) error {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return err
-		}
-		go handleConnection(conn, store, aofWriter)
-	}
+	s := NewServer(nil, store, aofWriter)
+	return s.Serve(listener)
 }
 
+// runServerWithContext starts listening with the given ServerContext.
+func runServerWithContext(listener net.Listener, ctx *ServerContext) error {
+	return ctx.server.Serve(listener)
+}
+
+// main is the production entrypoint of the MiniRedis database server.
 func main() {
-	store := storage.NewStore()
-	defer store.Close()
-
-	var startOffset int64 = 0
-	if header, entries, err := snapshot.Load("dump.rdb"); err == nil {
-		store.LoadSnapshot(entries)
-		startOffset = header.AOFOffset
-	}
-
-	_, _ = aof.RecoverWithOffset("appendonly.aof", store, startOffset)
-
-	aofWriter, err := aof.Open("appendonly.aof", aof.SyncEverySecond)
+	// Step 1: Load and validate configuration from file and/or command-line flags
+	cfg, err := config.LoadFromFlags(os.Args[1:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open AOF: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
 		os.Exit(1)
 	}
-	defer aofWriter.Close()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:6379")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to bind to port 6379: %v\n", err)
+	// Step 2: Initialize structured logger
+	logger.Init(cfg.LogLevel)
+
+	logger.Info("Starting MiniRedis server...",
+		"version", "1.0.0",
+		"port", cfg.Port,
+		"host", cfg.Host,
+		"max_keys", cfg.MaxKeys,
+	)
+
+	// Step 3: Initialize in-memory storage engine
+	var store *storage.Store
+	if cfg.MaxKeys > 0 {
+		store = storage.NewStoreWithCapacity(cfg.MaxKeys)
+	} else {
+		store = storage.NewStore()
+	}
+
+	// Step 4: Restore from snapshot if present
+	var startAOFOffset int64 = 0
+	header, snapEntries, err := snapshot.Load(cfg.SnapshotPath)
+	if err == nil {
+		store.LoadSnapshot(snapEntries)
+		startAOFOffset = header.AOFOffset
+		logger.Info("Database snapshot restored",
+			"path", cfg.SnapshotPath,
+			"keys_restored", header.KeyCount,
+			"paired_aof_offset", header.AOFOffset,
+		)
+	} else if !os.IsNotExist(err) {
+		logger.Error("Failed to load snapshot", "path", cfg.SnapshotPath, "error", err)
 		os.Exit(1)
 	}
-	defer listener.Close()
 
-	fmt.Println("MiniRedis server listening on 127.0.0.1:6379...")
-	if err := runServer(listener, store, aofWriter); err != nil {
-		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
+	// Step 5: Replay AOF records occurring after the snapshot's AOF offset
+	recoveryResult, err := aof.RecoverWithOffset(cfg.AOFPath, store, startAOFOffset)
+	if err != nil {
+		logger.Error("AOF recovery failed", "path", cfg.AOFPath, "error", err)
+		os.Exit(1)
+	}
+	if recoveryResult.CommandsReplayed > 0 {
+		logger.Info("AOF replay completed",
+			"commands_replayed", recoveryResult.CommandsReplayed,
+			"start_offset", startAOFOffset,
+		)
+	}
+	if recoveryResult.TruncatedBytes > 0 {
+		logger.Warn("AOF recovery truncated torn trailing bytes",
+			"bytes_truncated", recoveryResult.TruncatedBytes,
+		)
+	}
+
+	// Step 6: Open AOF for appending new mutations
+	var syncPolicy aof.SyncPolicy
+	switch cfg.AppendFsync {
+	case "always":
+		syncPolicy = aof.SyncAlways
+	case "no":
+		syncPolicy = aof.SyncNo
+	default:
+		syncPolicy = aof.SyncEverySecond
+	}
+
+	aofWriter, err := aof.Open(cfg.AOFPath, syncPolicy)
+	if err != nil {
+		logger.Error("Failed to open AOF file", "path", cfg.AOFPath, "error", err)
+		os.Exit(1)
+	}
+
+	// Step 7: Construct server and start accepting connections
+	server := NewServer(cfg, store, aofWriter)
+
+	if err := server.Start(); err != nil {
+		logger.Error("Server terminated unexpectedly", "error", err)
 		os.Exit(1)
 	}
 }
