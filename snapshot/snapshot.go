@@ -40,7 +40,7 @@ var (
 
 // Encode serializes in-memory snapshot entries along with the AOF offset
 // into a binary byte slice including header and trailing CRC32 checksum.
-// This format is used both for on-disk snapshots and over-the-network replication.
+// Stream-compatible binary serialization with CRC32 verification for primary-replica replication.
 func Encode(aofOffset int64, entries []storage.SnapshotEntry) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
