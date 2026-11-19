@@ -1,0 +1,60 @@
+services:
+  # Primary Node (Leader) - Read / Write
+  miniredis-primary:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: miniredis-primary
+    command: >
+      -host 0.0.0.0
+      -port 6379
+      -health-port 8080
+      -aof /data/primary.aof
+      -snapshot /data/primary.rdb
+      -loglevel info
+    ports:
+      - "6379:6379"
+      - "8080:8080"
+    volumes:
+      - primary-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+
+  # Replica Node (Follower) - Read-Only Mirror
+  miniredis-replica:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: miniredis-replica
+    command: >
+      -host 0.0.0.0
+      -port 6380
+      -health-port 8081
+      -replicaof miniredis-primary:6379
+      -aof /data/replica.aof
+      -snapshot /data/replica.rdb
+      -loglevel info
+    ports:
+      - "6380:6380"
+      - "8081:8081"
+    volumes:
+      - replica-data:/data
+    depends_on:
+      miniredis-primary:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/readyz"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
+
+volumes:
+  primary-data:
+  replica-data:

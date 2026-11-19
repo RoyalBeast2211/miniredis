@@ -1,0 +1,11 @@
+.git
+.gitignore
+.github
+*.aof
+*.rdb
+*.tmp
+*.log
+profiles/
+loadtest/results/
+bin/
+tmp/
